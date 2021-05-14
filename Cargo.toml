@@ -1,0 +1,7 @@
+[package]
+name = "bellman_rescue_cipher"
+version = "0.1.0"
+
+[dependencies]
+rand = "0.4"
+bellman = { package = "bellman_ce", git = "https://github.com/matter-labs/bellman", branch = "dev" }
