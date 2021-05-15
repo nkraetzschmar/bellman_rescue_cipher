@@ -4,4 +4,7 @@ version = "0.1.0"
 
 [dependencies]
 rand = "0.4"
+num-integer = "0.1.44"
+num-traits = "0.2.14"
+num-bigint = "0.4.0"
 bellman = { package = "bellman_ce", git = "https://github.com/matter-labs/bellman", branch = "dev" }

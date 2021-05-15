@@ -1,7 +1,13 @@
 extern crate rand;
+extern crate num_integer;
+extern crate num_traits;
+extern crate num_bigint;
 extern crate bellman;
 
 use rand::thread_rng;
+use num_integer::{Integer, ExtendedGcd};
+use num_traits::{One};
+use num_bigint::{BigUint, ToBigInt};
 use bellman::{
 	Field,
 	PrimeField,
@@ -22,7 +28,7 @@ use bellman::{
 	}
 };
 
-fn pow<E: Engine, CS: ConstraintSystem<E>>(n: u32, mut cs: CS, x_val: &Option<E::Fr>, x: &Variable) -> Result<(Option<E::Fr>, Variable), SynthesisError> {
+fn pow<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x_val: &Option<E::Fr>, x: &Variable, n: u32) -> Result<(Option<E::Fr>, Variable), SynthesisError> {
 	match n {
 		0 => { Ok((Some(E::Fr::one()), CS::one())) }
 		_ => {
@@ -37,7 +43,7 @@ fn pow<E: Engine, CS: ConstraintSystem<E>>(n: u32, mut cs: CS, x_val: &Option<E:
 					|| "x_2 = x_n * x_n",
 					|lc| lc + x_n,
 					|lc| lc + x_n,
-					|lc| lc + x_2,
+					|lc| lc + x_2
 				);
 
 				if n & (1 << i) != 0 {
@@ -47,7 +53,7 @@ fn pow<E: Engine, CS: ConstraintSystem<E>>(n: u32, mut cs: CS, x_val: &Option<E:
 						|| "x_3 = x * x_2",
 						|lc| lc + *x,
 						|lc| lc + x_2,
-						|lc| lc + x_3,
+						|lc| lc + x_3
 					);
 
 					x_n_val = x_3_val;
@@ -63,37 +69,39 @@ fn pow<E: Engine, CS: ConstraintSystem<E>>(n: u32, mut cs: CS, x_val: &Option<E:
 	}
 }
 
-fn inv<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x_val: &Option<E::Fr>, x: &Variable) -> Result<(Option<E::Fr>, Variable), SynthesisError> {
-	let x_inv_val = x_val.and_then(|x| x.inverse());
-	let x_inv = cs.alloc(|| "x_inv", || x_inv_val.ok_or(SynthesisError::AssignmentMissing))?;
+fn pow_inv<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x_val: &Option<E::Fr>, x: &Variable, n: u32, n_inv: &[u64]) -> Result<(Option<E::Fr>, Variable), SynthesisError> {
+	let y_val = x_val.map(|x| x.pow(n_inv));
+	let y = cs.alloc(|| "y", || y_val.ok_or(SynthesisError::AssignmentMissing))?;
+	let (_y_n_val, y_n) = pow(cs.namespace(|| "pow"), &y_val, &y, n)?;
+
 	cs.enforce(
-		|| "x * x_inv = 1",
-		|lc| lc + *x,
-		|lc| lc + x_inv,
+		|| "x = y_5",
+		|lc| lc + y_n,
 		|lc| lc + CS::one(),
+		|lc| lc + *x
 	);
 
-	Ok((x_inv_val, x_inv))
+	Ok((y_val, y))
 }
 
-pub struct InvPow5<E: Engine> {
+pub struct InvPow5<'a, E: Engine> {
+	pub alpha: u32,
+	pub alpha_inv: &'a [u64],
 	pub x: Vec<Option<E::Fr>>
 }
 
-impl <E: Engine> Circuit<E> for InvPow5<E> {
+impl <E: Engine> Circuit<E> for InvPow5<'_, E> {
 	fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
 		for x_val in self.x.iter() {
 			let x = cs.alloc(|| "x", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
+			let (y_val, y) = pow_inv(cs.namespace(|| "pow_inv"), &x_val, &x, self.alpha, &self.alpha_inv)?;
 
-			let (x_5_val, x_5) = pow(5, cs.namespace(|| "pow5"), &x_val, &x)?;
-			let (x_5_inv_val, x_5_inv) = inv(cs.namespace(|| "inv"), &x_5_val, &x_5)?;
-
-			let out = cs.alloc_input(|| "out", || x_5_inv_val.ok_or(SynthesisError::AssignmentMissing))?;
+			let out = cs.alloc_input(|| "out", || y_val.ok_or(SynthesisError::AssignmentMissing))?;
 			cs.enforce(
-				|| "x_5_inv = out",
-				|lc| lc + x_5_inv,
+				|| "y_val = out",
+				|lc| lc + y,
 				|lc| lc + CS::one(),
-				|lc| lc + out,
+				|lc| lc + out
 			);
 		}
 
@@ -103,21 +111,35 @@ impl <E: Engine> Circuit<E> for InvPow5<E> {
 
 fn main(){
 	const M: usize = 8;
+	const ALPHA: u32 = 5;
+
+	let alpha_inv = {
+		let modulus = BigUint::new(Fr::char().as_ref()
+		                                     .iter()
+		                                     .map(|x| vec![*x as u32, (*x >> 32) as u32])
+		                                     .flatten()
+		                                     .collect()) - 1u32;
+
+		let ExtendedGcd{ gcd, x: alpha_inv, .. } = ALPHA.to_bigint().unwrap().extended_gcd(&modulus.to_bigint().unwrap());
+		assert!(gcd.is_one());
+		alpha_inv.to_biguint().unwrap().to_u64_digits()
+	};
 
 	let rng = &mut thread_rng();
-	let c = InvPow5::<Bls12> { x: vec![None; M] };
+	let c = InvPow5::<Bls12> { alpha: ALPHA, alpha_inv: &alpha_inv, x: vec![None; M] };
 	let params = generate_random_parameters(c, rng).unwrap();
 
 	let pvk = prepare_verifying_key(&params.vk);
 
 	let x = Fr::from_str("3");
-	let x_5 = x.map(|x| x.pow(&[5]));
-	let x_5_inv = x_5.and_then(|x| x.inverse());
+	let y = x.map(|x| x.pow(&alpha_inv));
+	let z = y.map(|x| x.pow(&[ALPHA as u64]));
+	assert!(x == z);
 
-	let c = InvPow5::<Bls12> { x: vec![x; M] };
+	let c = InvPow5::<Bls12> { alpha: ALPHA, alpha_inv: &alpha_inv, x: vec![x; M] };
 	let proof = create_random_proof(c, &params, rng).unwrap();
 
-	let correct = verify_proof(&pvk, &proof, &[x_5_inv.unwrap(); M]).unwrap();
+	let correct = verify_proof(&pvk, &proof, &[y.unwrap(); M]).unwrap();
 
 	println!("{}", correct);
 }
