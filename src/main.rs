@@ -22,10 +22,6 @@ use bellman::{
 	}
 };
 
-pub struct InvPow5<E: Engine> {
-	pub x: Option<E::Fr>,
-}
-
 fn pow<E: Engine, CS: ConstraintSystem<E>>(n: u32, mut cs: CS, x_val: &Option<E::Fr>, x: &Variable) -> Result<(Option<E::Fr>, Variable), SynthesisError> {
 	match n {
 		0 => { Ok((Some(E::Fr::one()), CS::one())) }
@@ -80,29 +76,36 @@ fn inv<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x_val: &Option<E::Fr>, x:
 	Ok((x_inv_val, x_inv))
 }
 
+pub struct InvPow5<E: Engine> {
+	pub x: Vec<Option<E::Fr>>
+}
+
 impl <E: Engine> Circuit<E> for InvPow5<E> {
 	fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
-		let x_val = self.x;
-		let x = cs.alloc(|| "x", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
+		for x_val in self.x.iter() {
+			let x = cs.alloc(|| "x", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
 
-		let (x_5_val, x_5) = pow(5, cs.namespace(|| "pow5"), &x_val, &x)?;
-		let (x_5_inv_val, x_5_inv) = inv(cs.namespace(|| "inv"), &x_5_val, &x_5)?;
+			let (x_5_val, x_5) = pow(5, cs.namespace(|| "pow5"), &x_val, &x)?;
+			let (x_5_inv_val, x_5_inv) = inv(cs.namespace(|| "inv"), &x_5_val, &x_5)?;
 
-		let out = cs.alloc_input(|| "out", || x_5_inv_val.ok_or(SynthesisError::AssignmentMissing))?;
-		cs.enforce(
-			|| "x_5_inv = out",
-			|lc| lc + x_5_inv,
-			|lc| lc + CS::one(),
-			|lc| lc + out,
-		);
+			let out = cs.alloc_input(|| "out", || x_5_inv_val.ok_or(SynthesisError::AssignmentMissing))?;
+			cs.enforce(
+				|| "x_5_inv = out",
+				|lc| lc + x_5_inv,
+				|lc| lc + CS::one(),
+				|lc| lc + out,
+			);
+		}
 
 		Ok(())
 	}
 }
 
 fn main(){
+	const M: usize = 8;
+
 	let rng = &mut thread_rng();
-	let c = InvPow5::<Bls12> { x: None };
+	let c = InvPow5::<Bls12> { x: vec![None; M] };
 	let params = generate_random_parameters(c, rng).unwrap();
 
 	let pvk = prepare_verifying_key(&params.vk);
@@ -111,10 +114,10 @@ fn main(){
 	let x_5 = x.map(|x| x.pow(&[5]));
 	let x_5_inv = x_5.and_then(|x| x.inverse());
 
-	let c = InvPow5::<Bls12> { x: x };
+	let c = InvPow5::<Bls12> { x: vec![x; M] };
 	let proof = create_random_proof(c, &params, rng).unwrap();
 
-	let correct = verify_proof(&pvk, &proof, &[x_5_inv.unwrap()]).unwrap();
+	let correct = verify_proof(&pvk, &proof, &[x_5_inv.unwrap(); M]).unwrap();
 
 	println!("{}", correct);
 }
