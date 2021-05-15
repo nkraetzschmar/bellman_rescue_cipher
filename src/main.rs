@@ -69,7 +69,7 @@ fn pow<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x_val: &Option<E::Fr>, x:
 	}
 }
 
-fn pow_inv<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x_val: &Option<E::Fr>, x: &Variable, n: u32, n_inv: &[u64]) -> Result<(Option<E::Fr>, Variable), SynthesisError> {
+fn inv_pow<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x_val: &Option<E::Fr>, x: &Variable, n: u32, n_inv: &[u64]) -> Result<(Option<E::Fr>, Variable), SynthesisError> {
 	let y_val = x_val.map(|x| x.pow(n_inv));
 	let y = cs.alloc(|| "y", || y_val.ok_or(SynthesisError::AssignmentMissing))?;
 	let (_y_n_val, y_n) = pow(cs.namespace(|| "pow"), &y_val, &y, n)?;
@@ -84,22 +84,70 @@ fn pow_inv<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x_val: &Option<E::Fr>
 	Ok((y_val, y))
 }
 
-pub struct InvPow5<'a, E: Engine> {
-	pub alpha: u32,
-	pub alpha_inv: &'a [u64],
-	pub x: Vec<Option<E::Fr>>
+fn vec_add<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x: &[(Option<E::Fr>, Variable)], y: &[(Option<E::Fr>, Variable)]) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
+	if x.len() == y.len() {
+		x.iter().zip(y.iter()).map(|((x_val, x), (y_val, y))| {
+			let z_val = x_val.and_then(|mut x| y_val.as_ref().map(|y| { x.add_assign(y); x }));
+			let z = cs.alloc(|| "z", || z_val.ok_or(SynthesisError::AssignmentMissing))?;
+			cs.enforce(
+				|| "x + y = z",
+				|lc| lc + *x + *y,
+				|lc| lc + CS::one(),
+				|lc| lc + z
+			);
+
+			Ok((z_val, z))
+		}).collect()
+	} else {
+		Err(SynthesisError::AssignmentMissing)
+	}
 }
 
-impl <E: Engine> Circuit<E> for InvPow5<'_, E> {
-	fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
-		for x_val in self.x.iter() {
-			let x = cs.alloc(|| "x", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
-			let (y_val, y) = pow_inv(cs.namespace(|| "pow_inv"), &x_val, &x, self.alpha, &self.alpha_inv)?;
+fn vec_pow<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x: &[(Option<E::Fr>, Variable)], n: u32) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
+	x.iter().map(|(x_val, x)| {
+		pow(cs.namespace(|| "pow"), x_val, x, n)
+	}).collect()
+}
 
-			let out = cs.alloc_input(|| "out", || y_val.ok_or(SynthesisError::AssignmentMissing))?;
+fn vec_inv_pow<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x: &[(Option<E::Fr>, Variable)], n: u32, n_inv: &[u64]) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
+	x.iter().map(|(x_val, x)| {
+		inv_pow(cs.namespace(|| "inv_pow"), x_val, x, n, n_inv)
+	}).collect()
+}
+
+pub struct RescuePermutation<'a, E: Engine> {
+	pub alpha: u32,
+	pub alpha_inv: &'a [u64],
+	pub x: Vec<Option<E::Fr>>,
+	pub k: [Vec<Option<E::Fr>>; 2]
+}
+
+impl <E: Engine> Circuit<E> for RescuePermutation<'_, E> {
+	fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
+		let mut x: Vec<(Option<E::Fr>, Variable)> = Vec::with_capacity(self.x.len());
+		for x_val in self.x.iter() {
+			let x_var = cs.alloc(|| "x", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
+			x.push((*x_val, x_var));
+		}
+
+		let mut k: [Vec<(Option<E::Fr>, Variable)>; 2] = [Vec::with_capacity(self.k[0].len()), Vec::with_capacity(self.k[1].len())];
+		for i in 0..2 {
+			for k_val in self.k[i].iter() {
+				let k_var = cs.alloc(|| "k", || k_val.ok_or(SynthesisError::AssignmentMissing))?;
+				k[i].push((*k_val, k_var));
+			}
+		}
+
+		let x = vec_inv_pow(cs.namespace(|| "vec_inv_pow"), &x, self.alpha, self.alpha_inv)?;
+		let x = vec_add(cs.namespace(|| "vec_add"), &x, &k[0])?;
+		let x = vec_pow(cs.namespace(|| "vec_pow"), &x, self.alpha)?;
+		let x = vec_add(cs.namespace(|| "vec_add"), &x, &k[1])?;
+
+		for (x_val, x) in x.into_iter() {
+			let out = cs.alloc_input(|| "out", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
 			cs.enforce(
-				|| "y_val = out",
-				|lc| lc + y,
+				|| "x_val = out",
+				|lc| lc + x,
 				|lc| lc + CS::one(),
 				|lc| lc + out
 			);
@@ -126,17 +174,33 @@ fn main(){
 	};
 
 	let rng = &mut thread_rng();
-	let c = InvPow5::<Bls12> { alpha: ALPHA, alpha_inv: &alpha_inv, x: vec![None; M] };
+	let c = RescuePermutation::<Bls12> {
+		alpha: ALPHA,
+		alpha_inv: &alpha_inv,
+		x: vec![None; M],
+		k: [vec![None; M], vec![None; M]]
+	};
 	let params = generate_random_parameters(c, rng).unwrap();
 
 	let pvk = prepare_verifying_key(&params.vk);
 
 	let x = Fr::from_str("3");
 	let y = x.map(|x| x.pow(&alpha_inv));
-	let z = y.map(|x| x.pow(&[ALPHA as u64]));
+	let z = y.map(|y| y.pow(&[ALPHA as u64]));
 	assert!(x == z);
 
-	let c = InvPow5::<Bls12> { alpha: ALPHA, alpha_inv: &alpha_inv, x: vec![x; M] };
+	let k = [Fr::from_str("11"), Fr::from_str("42")];
+
+	let y = y.and_then(|mut y| k[0].map(|k| { y.add_assign(&k); y }));
+	let y = y.map(|y| y.pow(&[ALPHA as u64]));
+	let y = y.and_then(|mut y| k[1].map(|k| { y.add_assign(&k); y }));
+
+	let c = RescuePermutation::<Bls12> {
+		alpha: ALPHA,
+		alpha_inv: &alpha_inv,
+		x: vec![x; M],
+		k: [vec![k[0]; M], vec![k[1]; M]]
+	};
 	let proof = create_random_proof(c, &params, rng).unwrap();
 
 	let correct = verify_proof(&pvk, &proof, &[y.unwrap(); M]).unwrap();
