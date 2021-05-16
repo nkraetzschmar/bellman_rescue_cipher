@@ -162,7 +162,8 @@ pub struct RescueParams<E: Engine> {
 	pub alpha: u32,
 	pub alpha_inv: Vec<u64>,
 	pub mat: Vec<Vec<E::Fr>>,
-	pub round_constants: Vec<Vec<E::Fr>>
+	pub init_constants: Vec<E::Fr>,
+	pub round_constants: Vec<[Vec<E::Fr>; 2]>
 }
 
 impl <E: Engine> RescueParams<E> {
@@ -184,7 +185,8 @@ impl <E: Engine> RescueParams<E> {
 
 		let mut constants: Vec<Vec<E::Fr>> = Vec::with_capacity(rounds * 2);
 		constants.push(constants_init);
-		for _ in 1..rounds {
+
+		for _ in 0..(2 * rounds) {
 			constants.push(constants_mat.iter().map(|row| {
 				constants.last().unwrap().iter()
 				                         .zip(row)
@@ -192,6 +194,8 @@ impl <E: Engine> RescueParams<E> {
 				                         .fold(E::Fr::zero(), |mut x, y| { x.add_assign(&y); x })
 			}).zip(constants_add.iter()).map(|(mut x, y)| { x.add_assign(y); x }).collect());
 		}
+
+		let (constants_head, constants_tail) = constants.split_at(1);
 
 		Self {
 			m: m,
@@ -208,7 +212,8 @@ impl <E: Engine> RescueParams<E> {
 				alpha_inv.to_biguint().unwrap().to_u64_digits()
 			},
 			mat: mat.iter().map(|row| row.iter().map(|str| E::Fr::from_str(str).unwrap()).collect()).collect(),
-			round_constants: constants,
+			init_constants: constants_head[0].clone(),
+			round_constants: constants_tail.chunks(2).map(|x| [x[0].clone(), x[1].clone()]).collect(),
 		}
 	}
 }
@@ -227,18 +232,32 @@ impl <E: Engine> Circuit<E> for RescuePermutation<'_, E> {
 			x.push((*x_val, x_var));
 		}
 
-		/*let mut k: Vec<(Option<E::Fr>, Variable)> = Vec::with_capacity(self.k.len());
+		let mut k: Vec<(Option<E::Fr>, Variable)> = Vec::with_capacity(self.k.len());
 		for k_val in self.k.iter() {
 			let k_var = cs.alloc(|| "k", || k_val.ok_or(SynthesisError::AssignmentMissing))?;
 			k.push((*k_val, k_var));
-		}*/
+		}
 
-		let x = vec_inv_pow(cs.namespace(|| "vec_inv_pow"), &x, self.params.alpha, &self.params.alpha_inv)?;
-		let x = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &x)?;
-		//let x = vec_add(cs.namespace(|| "vec_add"), &x, &k[0])?;
-		let x = vec_pow(cs.namespace(|| "vec_pow"), &x, self.params.alpha)?;
-		let x = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &x)?;
-		//let x = vec_add(cs.namespace(|| "vec_add"), &x, &k[1])?;
+		k = vec_add_const(cs.namespace(|| "vec_add"), &k, &self.params.init_constants)?;
+		x = vec_add(cs.namespace(|| "vec_add"), &x, &k)?;
+
+		for c in self.params.round_constants.iter() {
+			k = vec_inv_pow(cs.namespace(|| "vec_inv_pow"), &k, self.params.alpha, &self.params.alpha_inv)?;
+			k = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &k)?;
+			k = vec_add_const(cs.namespace(|| "vec_add"), &k, &c[0])?;
+
+			x = vec_inv_pow(cs.namespace(|| "vec_inv_pow"), &x, self.params.alpha, &self.params.alpha_inv)?;
+			x = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &x)?;
+			x = vec_add(cs.namespace(|| "vec_add"), &x, &k)?;
+
+			k = vec_pow(cs.namespace(|| "vec_pow"), &k, self.params.alpha)?;
+			k = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &k)?;
+			k = vec_add_const(cs.namespace(|| "vec_add"), &k, &c[1])?;
+
+			x = vec_pow(cs.namespace(|| "vec_pow"), &x, self.params.alpha)?;
+			x = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &x)?;
+			x = vec_add(cs.namespace(|| "vec_add"), &x, &k)?;
+		}
 
 		for (x_val, x) in x.iter() {
 			let out = cs.alloc_input(|| "out", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
@@ -252,6 +271,63 @@ impl <E: Engine> Circuit<E> for RescuePermutation<'_, E> {
 
 		Ok(())
 	}
+}
+
+fn rescue_cipher_block_enc<E: Engine>(params: &RescueParams<E>, k: &[E::Fr], x: &[E::Fr]) -> Vec<E::Fr> {
+	let mut x = x.to_vec();
+	let mut k = k.to_vec();
+
+	k = k.iter().zip(params.init_constants.iter())
+	            .map(|(k, c)| { let mut k = *k; k.add_assign(c); k })
+	            .collect();
+
+	x = x.iter().zip(k.iter())
+	            .map(|(x, k)| { let mut x = *x; x.add_assign(k); x })
+	            .collect();
+
+	for c in params.round_constants.iter() {
+		k = k.into_iter().map(|k| k.pow(&params.alpha_inv)).collect();
+		k = params.mat.iter().map(|row| {
+			k.iter().zip(row)
+			        .map(|(k, s)| { let mut k = *k; k.mul_assign(s); k })
+			        .fold(E::Fr::zero(), |mut a, b| { a.add_assign(&b); a })
+		}).collect();
+		k = k.iter().zip(c[0].iter())
+		            .map(|(k, c)| { let mut k = *k; k.add_assign(c); k })
+		            .collect();
+
+		x = x.into_iter().map(|x| x.pow(&params.alpha_inv)).collect();
+		x = params.mat.iter().map(|row| {
+			x.iter().zip(row)
+			        .map(|(x, s)| { let mut x = *x; x.mul_assign(s); x })
+			        .fold(E::Fr::zero(), |mut a, b| { a.add_assign(&b); a })
+		}).collect();
+		x = x.iter().zip(k.iter())
+		            .map(|(x, k)| { let mut x = *x; x.add_assign(k); x })
+		            .collect();
+
+		k = k.into_iter().map(|k| k.pow(&[params.alpha as u64])).collect();
+		k = params.mat.iter().map(|row| {
+			k.iter().zip(row)
+			        .map(|(k, s)| { let mut k = *k; k.mul_assign(s); k })
+			        .fold(E::Fr::zero(), |mut a, b| { a.add_assign(&b); a })
+		}).collect();
+		k = k.iter().zip(c[1].iter())
+		            .map(|(k, c)| { let mut k = *k; k.add_assign(c); k })
+		            .collect();
+
+		x = x.into_iter().map(|x| x.pow(&[params.alpha as u64])).collect();
+		x = params.mat.iter().map(|row| {
+			x.iter().zip(row)
+			        .map(|(x, s)| { let mut x = *x; x.mul_assign(s); x })
+			        .fold(E::Fr::zero(), |mut a, b| { a.add_assign(&b); a })
+		}).collect();
+		x = x.iter().zip(k.iter())
+		            .map(|(x, k)| { let mut x = *x; x.add_assign(k); x })
+		            .collect();
+	}
+
+	x
 }
 
 fn main(){
@@ -311,33 +387,10 @@ fn main(){
 
 	let pvk = prepare_verifying_key(&params.vk);
 
-	let x: Vec<Fr> = (0..rescue_params.m).map(|_| Fr::from_str("3").unwrap()).collect();
-	let y: Vec<Fr> = x.iter().map(|x| x.pow(&rescue_params.alpha_inv)).collect();
-	let z: Vec<Fr> = y.iter().map(|y| y.pow(&[rescue_params.alpha as u64])).collect();
-	for (x, z) in x.iter().zip(z) {
-		let mut x = *x;
-		x.sub_assign(&z);
-		assert!(x.is_zero());
-	}
-
+	let x: Vec<Fr> = (0..rescue_params.m).map(|i| Fr::from_str(&i.to_string()).unwrap()).collect();
 	let k: Vec<Fr> = (0..rescue_params.m).map(|_| Fr::from_str("0").unwrap()).collect();
 
-	let y: Vec<Fr> = rescue_params.mat.iter().map(|row| {
-		y.iter().zip(row)
-		        .map(|(y, s)| { let mut y = *y; y.mul_assign(s); y })
-		        .fold(Fr::zero(), |mut x, y| { x.add_assign(&y); x })
-	}).collect();
-
-	//let y: Vec<Fr> = y.iter().zip(k[0].iter()).map(|(y, k)| { let mut y = *y; y.add_assign(k); y }).collect();
-	let y: Vec<Fr> = y.iter().map(|y| y.pow(&[rescue_params.alpha as u64])).collect();
-
-	let y: Vec<Fr> = rescue_params.mat.iter().map(|row| {
-		y.iter().zip(row)
-		        .map(|(y, s)| { let mut y = *y; y.mul_assign(s); y })
-		        .fold(Fr::zero(), |mut x, y| { x.add_assign(&y); x })
-	}).collect();
-
-	//let y: Vec<Fr> = y.iter().zip(k[1].iter()).map(|(y, k)| { let mut y = *y; y.add_assign(k); y }).collect();
+	let y = rescue_cipher_block_enc(&rescue_params, &k, &x);
 
 	let c = RescuePermutation::<Bls12> {
 		params: &rescue_params,
