@@ -1,10 +1,10 @@
+extern crate num_bigint;
 extern crate num_integer;
 extern crate num_traits;
-extern crate num_bigint;
 
-use self::num_integer::{Integer, ExtendedGcd};
-use self::num_traits::{One};
 use self::num_bigint::{BigUint, ToBigInt};
+use self::num_integer::{ExtendedGcd, Integer};
+use self::num_traits::One;
 use bellman::PrimeField;
 
 pub mod circuit;
@@ -20,26 +20,34 @@ pub fn mat_from_str<F: PrimeField>(str: &[&[&str]]) -> Vec<Vec<F>> {
 pub fn vec_add<F: PrimeField>(x: &Vec<F>, y: &Vec<F>) -> Vec<F> {
 	assert!(x.len() == y.len());
 
-	x.iter().zip(y.iter()).map(|(x, y)| {
-		let mut x = *x;
-		x.add_assign(y);
-		x
-	}).collect()
+	x.iter()
+		.zip(y.iter())
+		.map(|(x, y)| {
+			let mut x = *x;
+			x.add_assign(y);
+			x
+		})
+		.collect()
 }
 
 pub fn mat_vec_mul<F: PrimeField>(mat: &Vec<Vec<F>>, x: &Vec<F>) -> Vec<F> {
-	mat.iter().map(|row| {
-		assert!(x.len() == row.len());
+	mat.iter()
+		.map(|row| {
+			assert!(x.len() == row.len());
 
-		x.iter().zip(row.iter()).map(|(x, y)| {
-			let mut x = *x;
-			x.mul_assign(y);
-			x
-		}).fold(F::zero(), |mut x, y| {
-			x.add_assign(&y);
-			x
+			x.iter()
+				.zip(row.iter())
+				.map(|(x, y)| {
+					let mut x = *x;
+					x.mul_assign(y);
+					x
+				})
+				.fold(F::zero(), |mut x, y| {
+					x.add_assign(&y);
+					x
+				})
 		})
-	}).collect()
+		.collect()
 }
 
 pub fn vec_pow<F: PrimeField>(x: &Vec<F>, alpha: &[u64]) -> Vec<F> {
@@ -52,11 +60,19 @@ pub struct Params<F: PrimeField> {
 	pub alpha_inv: Vec<u64>,
 	pub mat: Vec<Vec<F>>,
 	pub constants_init: Vec<F>,
-	pub round_constants: Vec<(Vec<F>, Vec<F>)>
+	pub round_constants: Vec<(Vec<F>, Vec<F>)>,
 }
 
-impl <F: PrimeField> Params<F> {
-	pub fn new(m: usize, rounds: usize, alpha: u32, mat: &[&[&str]], constants_init: &[&str], constants_mat: &[&[&str]], constants_add: &[&str]) -> Self {
+impl<F: PrimeField> Params<F> {
+	pub fn new(
+		m: usize,
+		rounds: usize,
+		alpha: u32,
+		mat: &[&[&str]],
+		constants_init: &[&str],
+		constants_mat: &[&[&str]],
+		constants_add: &[&str],
+	) -> Self {
 		let mat = mat_from_str(mat);
 		let constants_init = vec_from_str(constants_init);
 		let constants_mat = mat_from_str(constants_mat);
@@ -65,7 +81,10 @@ impl <F: PrimeField> Params<F> {
 		let mut round_constants: Vec<(Vec<F>, Vec<F>)> = Vec::with_capacity(rounds);
 		for _ in 0..(rounds) {
 			round_constants.push({
-				let previous: &Vec<F> = round_constants.last().map(|(_, previous)| previous).unwrap_or(&constants_init);
+				let previous: &Vec<F> = round_constants
+					.last()
+					.map(|(_, previous)| previous)
+					.unwrap_or(&constants_init);
 				let mut constant_0 = mat_vec_mul(&constants_mat, previous);
 				constant_0 = vec_add(&constant_0, &constants_add);
 
@@ -80,8 +99,19 @@ impl <F: PrimeField> Params<F> {
 			m: m,
 			alpha: alpha,
 			alpha_inv: {
-				let modulus = BigUint::new(F::char().as_ref().iter().flat_map(|x| vec![*x as u32, (*x >> 32) as u32]).collect()) - 1u32;
-				let ExtendedGcd{ gcd, x: alpha_inv, .. } = alpha.to_bigint().unwrap().extended_gcd(&modulus.to_bigint().unwrap());
+				let modulus = BigUint::new(
+					F::char()
+						.as_ref()
+						.iter()
+						.flat_map(|x| vec![*x as u32, (*x >> 32) as u32])
+						.collect(),
+				) - 1u32;
+				let ExtendedGcd {
+					gcd, x: alpha_inv, ..
+				} = alpha
+					.to_bigint()
+					.unwrap()
+					.extended_gcd(&modulus.to_bigint().unwrap());
 				assert!(gcd.is_one());
 				alpha_inv.to_biguint().unwrap().to_u64_digits()
 			},
