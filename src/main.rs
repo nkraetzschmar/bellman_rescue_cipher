@@ -103,6 +103,25 @@ fn vec_add<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x: &[(Option<E::Fr>, 
 	}
 }
 
+fn vec_add_const<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x: &[(Option<E::Fr>, Variable)], y: &[E::Fr]) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
+	if x.len() == y.len() {
+		x.iter().zip(y.iter()).map(|((x_val, x), y)| {
+			let z_val = x_val.map(|mut x| { x.add_assign(y); x });
+			let z = cs.alloc(|| "z", || z_val.ok_or(SynthesisError::AssignmentMissing))?;
+			cs.enforce(
+				|| "x + y = z",
+				|lc| lc + *x + (*y, CS::one()),
+				|lc| lc + CS::one(),
+				|lc| lc + z
+			);
+
+			Ok((z_val, z))
+		}).collect()
+	} else {
+		Err(SynthesisError::AssignmentMissing)
+	}
+}
+
 fn vec_pow<E: Engine, CS: ConstraintSystem<E>>(mut cs: CS, x: &[(Option<E::Fr>, Variable)], n: u32) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
 	x.iter().map(|(x_val, x)| {
 		pow(cs.namespace(|| "pow"), x_val, x, n)
@@ -143,23 +162,36 @@ pub struct RescueParams<E: Engine> {
 	pub alpha: u32,
 	pub alpha_inv: Vec<u64>,
 	pub mat: Vec<Vec<E::Fr>>,
-	pub const_init: Vec<E::Fr>,
-	pub const_mat: Vec<Vec<E::Fr>>,
-	pub const_add: Vec<E::Fr>
+	pub round_constants: Vec<Vec<E::Fr>>
 }
 
 impl <E: Engine> RescueParams<E> {
-	fn new(m: usize, alpha: u32, mat: &[&[&str]], const_init: &[&str], const_mat: &[&[&str]], const_add: &[&str]) -> Self {
+	fn new(m: usize, rounds: usize, alpha: u32, mat: &[&[&str]], constants_init: &[&str], constants_mat: &[&[&str]], constants_add: &[&str]) -> Self {
 		assert!(mat.len() == m);
 		for row in mat.iter() {
 			assert!(row.len() == m);
 		}
-		assert!(const_init.len() == m);
-		assert!(const_mat.len() == m);
-		for row in const_mat.iter() {
+		assert!(constants_init.len() == m);
+		assert!(constants_mat.len() == m);
+		for row in constants_mat.iter() {
 			assert!(row.len() == m);
 		}
-		assert!(const_add.len() == m);
+		assert!(constants_add.len() == m);
+
+		let constants_init: Vec<E::Fr> = constants_init.iter().map(|str| E::Fr::from_str(str).unwrap()).collect();
+		let constants_mat: Vec<Vec<E::Fr>> = constants_mat.iter().map(|row| row.iter().map(|str| E::Fr::from_str(str).unwrap()).collect()).collect();
+		let constants_add: Vec<E::Fr> = constants_add.iter().map(|str| E::Fr::from_str(str).unwrap()).collect();
+
+		let mut constants: Vec<Vec<E::Fr>> = Vec::with_capacity(rounds * 2);
+		constants.push(constants_init);
+		for _ in 1..rounds {
+			constants.push(constants_mat.iter().map(|row| {
+				constants.last().unwrap().iter()
+				                         .zip(row)
+				                         .map(|(x, s)| { let mut x = *x; x.mul_assign(s); x })
+				                         .fold(E::Fr::zero(), |mut x, y| { x.add_assign(&y); x })
+			}).zip(constants_add.iter()).map(|(mut x, y)| { x.add_assign(y); x }).collect());
+		}
 
 		Self {
 			m: m,
@@ -176,9 +208,7 @@ impl <E: Engine> RescueParams<E> {
 				alpha_inv.to_biguint().unwrap().to_u64_digits()
 			},
 			mat: mat.iter().map(|row| row.iter().map(|str| E::Fr::from_str(str).unwrap()).collect()).collect(),
-			const_init: const_init.iter().map(|str| E::Fr::from_str(str).unwrap()).collect(),
-			const_mat: const_mat.iter().map(|row| row.iter().map(|str| E::Fr::from_str(str).unwrap()).collect()).collect(),
-			const_add: const_add.iter().map(|str| E::Fr::from_str(str).unwrap()).collect(),
+			round_constants: constants,
 		}
 	}
 }
@@ -186,7 +216,7 @@ impl <E: Engine> RescueParams<E> {
 pub struct RescuePermutation<'a, E: Engine> {
 	pub params: &'a RescueParams<E>,
 	pub x: Vec<Option<E::Fr>>,
-	pub k: [Vec<Option<E::Fr>>; 2]
+	pub k: Vec<Option<E::Fr>>
 }
 
 impl <E: Engine> Circuit<E> for RescuePermutation<'_, E> {
@@ -197,20 +227,18 @@ impl <E: Engine> Circuit<E> for RescuePermutation<'_, E> {
 			x.push((*x_val, x_var));
 		}
 
-		let mut k: [Vec<(Option<E::Fr>, Variable)>; 2] = [Vec::with_capacity(self.k[0].len()), Vec::with_capacity(self.k[1].len())];
-		for i in 0..2 {
-			for k_val in self.k[i].iter() {
-				let k_var = cs.alloc(|| "k", || k_val.ok_or(SynthesisError::AssignmentMissing))?;
-				k[i].push((*k_val, k_var));
-			}
-		}
+		/*let mut k: Vec<(Option<E::Fr>, Variable)> = Vec::with_capacity(self.k.len());
+		for k_val in self.k.iter() {
+			let k_var = cs.alloc(|| "k", || k_val.ok_or(SynthesisError::AssignmentMissing))?;
+			k.push((*k_val, k_var));
+		}*/
 
 		let x = vec_inv_pow(cs.namespace(|| "vec_inv_pow"), &x, self.params.alpha, &self.params.alpha_inv)?;
 		let x = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &x)?;
-		let x = vec_add(cs.namespace(|| "vec_add"), &x, &k[0])?;
+		//let x = vec_add(cs.namespace(|| "vec_add"), &x, &k[0])?;
 		let x = vec_pow(cs.namespace(|| "vec_pow"), &x, self.params.alpha)?;
 		let x = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &x)?;
-		let x = vec_add(cs.namespace(|| "vec_add"), &x, &k[1])?;
+		//let x = vec_add(cs.namespace(|| "vec_add"), &x, &k[1])?;
 
 		for (x_val, x) in x.iter() {
 			let out = cs.alloc_input(|| "out", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
@@ -229,6 +257,7 @@ impl <E: Engine> Circuit<E> for RescuePermutation<'_, E> {
 fn main(){
 	let rescue_params = RescueParams::<Bls12>::new( // parameters choosen with https://github.com/KULeuven-COSIC/Marvellous rescue instance generator for m=8 and alpha=5
 		8,
+		10,
 		5,
 		&[
 			&["52435875175126190479447740508185965837690552500527637362617122155198620207712", "52435875175126190479447740508185965837690552500085682758291472545432070783713", "52435875175126190479447740508185965837690180948849826184664541807331314824413", "52435875175126190479447740508185965530807066141876982447594476749845975030113", "52435875175126190479447740507933128785917572440565624616784716275136260809111", "52435875175126190479447532273612099891825396755801234592013277091016627662113", "52435875175126190307956157190266370280540209042396334073273195367138417459213", "52435875174984959614955767732782448015237669214112699215508711121903592721313"],
@@ -276,10 +305,7 @@ fn main(){
 	let c = RescuePermutation::<Bls12> {
 		params: &rescue_params,
 		x: (0..rescue_params.m).map(|_| None).collect(),
-		k: [
-			(0..rescue_params.m).map(|_| None).collect(),
-			(0..rescue_params.m).map(|_| None).collect()
-		]
+		k: (0..rescue_params.m).map(|_| None).collect()
 	};
 	let params = generate_random_parameters(c, rng).unwrap();
 
@@ -294,36 +320,29 @@ fn main(){
 		assert!(x.is_zero());
 	}
 
-	let k: [Vec<Fr>; 2] = [
-		(0..rescue_params.m).map(|_| Fr::from_str("11").unwrap()).collect(),
-		(0..rescue_params.m).map(|_| Fr::from_str("42").unwrap()).collect()
-	];
+	let k: Vec<Fr> = (0..rescue_params.m).map(|_| Fr::from_str("0").unwrap()).collect();
 
 	let y: Vec<Fr> = rescue_params.mat.iter().map(|row| {
-		assert!(row.len() == y.len());
-		y.iter()
-		.zip(row)
-		.map(|(y, s)| { let mut y = *y; y.mul_assign(s); y })
-		.fold(Fr::zero(), |mut x, y| { x.add_assign(&y); x })
+		y.iter().zip(row)
+		        .map(|(y, s)| { let mut y = *y; y.mul_assign(s); y })
+		        .fold(Fr::zero(), |mut x, y| { x.add_assign(&y); x })
 	}).collect();
 
-	let y: Vec<Fr> = y.iter().zip(k[0].iter()).map(|(y, k)| { let mut y = *y; y.add_assign(k); y }).collect();
+	//let y: Vec<Fr> = y.iter().zip(k[0].iter()).map(|(y, k)| { let mut y = *y; y.add_assign(k); y }).collect();
 	let y: Vec<Fr> = y.iter().map(|y| y.pow(&[rescue_params.alpha as u64])).collect();
 
 	let y: Vec<Fr> = rescue_params.mat.iter().map(|row| {
-		assert!(row.len() == y.len());
-		y.iter()
-		.zip(row)
-		.map(|(y, s)| { let mut y = *y; y.mul_assign(s); y })
-		.fold(Fr::zero(), |mut x, y| { x.add_assign(&y); x })
+		y.iter().zip(row)
+		        .map(|(y, s)| { let mut y = *y; y.mul_assign(s); y })
+		        .fold(Fr::zero(), |mut x, y| { x.add_assign(&y); x })
 	}).collect();
 
-	let y: Vec<Fr> = y.iter().zip(k[1].iter()).map(|(y, k)| { let mut y = *y; y.add_assign(k); y }).collect();
+	//let y: Vec<Fr> = y.iter().zip(k[1].iter()).map(|(y, k)| { let mut y = *y; y.add_assign(k); y }).collect();
 
 	let c = RescuePermutation::<Bls12> {
 		params: &rescue_params,
 		x: x.iter().map(|x| Some(*x)).collect(),
-		k: [k[0].iter().map(|k| Some(*k)).collect(), k[1].iter().map(|k| Some(*k)).collect()]
+		k: k.iter().map(|k| Some(*k)).collect()
 	};
 	let proof = create_random_proof(c, &params, rng).unwrap();
 
