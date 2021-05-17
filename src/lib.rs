@@ -19,6 +19,96 @@ mod test {
 
 	use rescue::circuit::RescueCircuit;
 
+	#[test]
+	fn test_block_enc() {
+		let rescue_params = get_bn256_params();
+
+		let x: Vec<Fr> = (0..rescue_params.m)
+			.map(|i| Fr::from_str(&i.to_string()).unwrap())
+			.collect();
+		let k: Vec<Fr> = (0..rescue_params.m)
+			.map(|_| Fr::from_str("0").unwrap())
+			.collect();
+
+		let y = rescue::block_enc(&rescue_params, &k, &x);
+
+		let z = vec![
+			Fr::from_str(
+				"18115515053415953917581139486887001768897115759088831626418737169294616432439",
+			)
+			.unwrap(),
+			Fr::from_str(
+				"15391884412258471150297222203888131333601336657782833535676486098849129264420",
+			)
+			.unwrap(),
+			Fr::from_str(
+				"9497864613630138039663614977172847176692393569290153329455703963925372784329",
+			)
+			.unwrap(),
+			Fr::from_str(
+				"14647769366465721237589983252638314715427476235771411034267772347394091077881",
+			)
+			.unwrap(),
+			Fr::from_str(
+				"12066478999576774568801435717359831612924741139745085014633091170896838474739",
+			)
+			.unwrap(),
+			Fr::from_str(
+				"17898368672876968277334019209354291943645716409502817530813944490405519824501",
+			)
+			.unwrap(),
+			Fr::from_str(
+				"8877285359103629518482023177163690385725232219702479947631784014650451293579",
+			)
+			.unwrap(),
+			Fr::from_str(
+				"15089397089390005663769203919803030132189261705103206323263396024009124558142",
+			)
+			.unwrap(),
+		];
+
+		for (y, z) in y.iter().zip(z.iter()) {
+			let mut w = *y;
+			w.sub_assign(z);
+			assert!(w.is_zero());
+		}
+	}
+
+	#[test]
+	fn test_circuit() {
+		let rescue_params = get_bn256_params();
+
+		let rng = &mut thread_rng();
+		let c = RescueCircuit::<Bn256> {
+			params: &rescue_params,
+			x: (0..rescue_params.m).map(|_| None).collect(),
+			k: (0..rescue_params.m).map(|_| None).collect(),
+		};
+		let params = generate_random_parameters(c, rng).unwrap();
+
+		let pvk = prepare_verifying_key(&params.vk);
+
+		let x: Vec<Fr> = (0..rescue_params.m)
+			.map(|i| Fr::from_str(&i.to_string()).unwrap())
+			.collect();
+		let k: Vec<Fr> = (0..rescue_params.m)
+			.map(|_| Fr::from_str("0").unwrap())
+			.collect();
+
+		let y = rescue::block_enc(&rescue_params, &k, &x);
+
+		let c = RescueCircuit::<Bn256> {
+			params: &rescue_params,
+			x: x.iter().map(|x| Some(*x)).collect(),
+			k: k.iter().map(|k| Some(*k)).collect(),
+		};
+		let proof = create_random_proof(c, &params, rng).unwrap();
+
+		let correct = verify_proof(&pvk, &proof, &y).unwrap();
+
+		println!("{}", correct);
+	}
+
 	fn get_bn256_params() -> rescue::Params<Fr> {
 		rescue::Params::new(
 			// parameters choosen with https://github.com/KULeuven-COSIC/Marvellous rescue instance generator for m=8 and alpha=5
@@ -210,95 +300,5 @@ mod test {
 				"20339279769661606457494952776306876843329519439434490048156316404864644899980",
 			],
 		)
-	}
-
-	#[test]
-	fn test_block_enc() {
-		let rescue_params = get_bn256_params();
-
-		let x: Vec<Fr> = (0..rescue_params.m)
-			.map(|i| Fr::from_str(&i.to_string()).unwrap())
-			.collect();
-		let k: Vec<Fr> = (0..rescue_params.m)
-			.map(|_| Fr::from_str("0").unwrap())
-			.collect();
-
-		let y = rescue::block_enc(&rescue_params, &k, &x);
-
-		let z = vec![
-			Fr::from_str(
-				"18115515053415953917581139486887001768897115759088831626418737169294616432439",
-			)
-			.unwrap(),
-			Fr::from_str(
-				"15391884412258471150297222203888131333601336657782833535676486098849129264420",
-			)
-			.unwrap(),
-			Fr::from_str(
-				"9497864613630138039663614977172847176692393569290153329455703963925372784329",
-			)
-			.unwrap(),
-			Fr::from_str(
-				"14647769366465721237589983252638314715427476235771411034267772347394091077881",
-			)
-			.unwrap(),
-			Fr::from_str(
-				"12066478999576774568801435717359831612924741139745085014633091170896838474739",
-			)
-			.unwrap(),
-			Fr::from_str(
-				"17898368672876968277334019209354291943645716409502817530813944490405519824501",
-			)
-			.unwrap(),
-			Fr::from_str(
-				"8877285359103629518482023177163690385725232219702479947631784014650451293579",
-			)
-			.unwrap(),
-			Fr::from_str(
-				"15089397089390005663769203919803030132189261705103206323263396024009124558142",
-			)
-			.unwrap(),
-		];
-
-		for (y, z) in y.iter().zip(z.iter()) {
-			let mut w = *y;
-			w.sub_assign(z);
-			assert!(w.is_zero());
-		}
-	}
-
-	#[test]
-	fn test_circuit() {
-		let rescue_params = get_bn256_params();
-
-		let rng = &mut thread_rng();
-		let c = RescueCircuit::<Bn256> {
-			params: &rescue_params,
-			x: (0..rescue_params.m).map(|_| None).collect(),
-			k: (0..rescue_params.m).map(|_| None).collect(),
-		};
-		let params = generate_random_parameters(c, rng).unwrap();
-
-		let pvk = prepare_verifying_key(&params.vk);
-
-		let x: Vec<Fr> = (0..rescue_params.m)
-			.map(|i| Fr::from_str(&i.to_string()).unwrap())
-			.collect();
-		let k: Vec<Fr> = (0..rescue_params.m)
-			.map(|_| Fr::from_str("0").unwrap())
-			.collect();
-
-		let y = rescue::block_enc(&rescue_params, &k, &x);
-
-		let c = RescueCircuit::<Bn256> {
-			params: &rescue_params,
-			x: x.iter().map(|x| Some(*x)).collect(),
-			k: k.iter().map(|k| Some(*k)).collect(),
-		};
-		let proof = create_random_proof(c, &params, rng).unwrap();
-
-		let correct = verify_proof(&pvk, &proof, &y).unwrap();
-
-		println!("{}", correct);
 	}
 }
