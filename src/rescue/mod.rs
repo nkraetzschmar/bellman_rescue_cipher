@@ -9,15 +9,15 @@ use bellman::PrimeField;
 
 pub mod circuit;
 
-pub fn vec_from_str<F: PrimeField>(str: &[&str]) -> Vec<F> {
+fn vec_from_str<F: PrimeField>(str: &[&str]) -> Vec<F> {
 	str.iter().map(|str| F::from_str(str).unwrap()).collect()
 }
 
-pub fn mat_from_str<F: PrimeField>(str: &[&[&str]]) -> Vec<Vec<F>> {
+fn mat_from_str<F: PrimeField>(str: &[&[&str]]) -> Vec<Vec<F>> {
 	str.iter().map(|str| vec_from_str(str)).collect()
 }
 
-pub fn vec_add<F: PrimeField>(x: &Vec<F>, y: &Vec<F>) -> Vec<F> {
+fn vec_add<F: PrimeField>(x: &Vec<F>, y: &Vec<F>) -> Vec<F> {
 	assert!(x.len() == y.len());
 
 	x.iter()
@@ -30,7 +30,7 @@ pub fn vec_add<F: PrimeField>(x: &Vec<F>, y: &Vec<F>) -> Vec<F> {
 		.collect()
 }
 
-pub fn mat_vec_mul<F: PrimeField>(mat: &Vec<Vec<F>>, x: &Vec<F>) -> Vec<F> {
+fn mat_vec_mul<F: PrimeField>(mat: &Vec<Vec<F>>, x: &Vec<F>) -> Vec<F> {
 	mat.iter()
 		.map(|row| {
 			assert!(x.len() == row.len());
@@ -50,7 +50,7 @@ pub fn mat_vec_mul<F: PrimeField>(mat: &Vec<Vec<F>>, x: &Vec<F>) -> Vec<F> {
 		.collect()
 }
 
-pub fn vec_pow<F: PrimeField>(x: &Vec<F>, alpha: &[u64]) -> Vec<F> {
+fn vec_pow<F: PrimeField>(x: &Vec<F>, alpha: &[u64]) -> Vec<F> {
 	x.iter().map(|x| x.pow(alpha)).collect()
 }
 
