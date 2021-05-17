@@ -2,9 +2,9 @@ extern crate num_bigint;
 extern crate num_integer;
 extern crate num_traits;
 
-use self::num_bigint::{BigUint, ToBigInt};
+use self::num_bigint::{BigInt, BigUint, ToBigInt};
 use self::num_integer::{ExtendedGcd, Integer};
-use self::num_traits::One;
+use self::num_traits::{One, Zero};
 use bellman::PrimeField;
 
 pub mod circuit;
@@ -99,21 +99,28 @@ impl<F: PrimeField> Params<F> {
 			m: m,
 			alpha: alpha,
 			alpha_inv: {
-				let modulus = BigUint::new(
+				let modulus = (BigUint::new(
 					F::char()
 						.as_ref()
 						.iter()
 						.flat_map(|x| vec![*x as u32, (*x >> 32) as u32])
 						.collect(),
-				) - 1u32;
+				) - 1u32)
+					.to_bigint()
+					.unwrap();
 				let ExtendedGcd {
 					gcd, x: alpha_inv, ..
-				} = alpha
-					.to_bigint()
-					.unwrap()
-					.extended_gcd(&modulus.to_bigint().unwrap());
+				} = alpha.to_bigint().unwrap().extended_gcd(&modulus);
 				assert!(gcd.is_one());
-				alpha_inv.to_biguint().unwrap().to_u64_digits()
+
+				(if alpha_inv >= BigInt::zero() {
+					alpha_inv
+				} else {
+					alpha_inv + &modulus
+				})
+				.to_biguint()
+				.unwrap()
+				.to_u64_digits()
 			},
 			mat: mat,
 			constants_init: constants_init,
