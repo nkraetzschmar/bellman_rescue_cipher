@@ -1,17 +1,19 @@
-extern crate bellman;
+extern crate franklin_crypto;
+
+use franklin_crypto::bellman::PrimeField;
 
 pub mod rescue;
 
 #[cfg(test)]
 mod test {
-	extern crate rand;
-
-	use self::rand::thread_rng;
-	use bellman::{
-		bn256::{Bn256, Fr},
-		groth16::{
-			create_random_proof, generate_random_parameters, prepare_verifying_key, verify_proof,
+	use franklin_crypto::bellman::{
+		kate_commitment::*,
+		pairing::bn256::{Bn256, Fr},
+		plonk::{
+			better_better_cs::cs::*,
+			commitments::transcript::keccak_transcript::RollingKeccakTranscript,
 		},
+		worker::Worker,
 		Field, PrimeField,
 	};
 
@@ -21,18 +23,9 @@ mod test {
 
 	#[test]
 	fn test_block_enc() {
-		let rescue_params = get_bn256_params();
+		let (_, _, _, cipher_text) = setup_test_params();
 
-		let x: Vec<Fr> = (0..rescue_params.m)
-			.map(|i| Fr::from_str(&i.to_string()).unwrap())
-			.collect();
-		let k: Vec<Fr> = (0..rescue_params.m)
-			.map(|_| Fr::from_str("0").unwrap())
-			.collect();
-
-		let y = rescue::block_enc(&rescue_params, &k, &x);
-
-		let z = vec![
+		let check_cipher_text = vec![
 			Fr::from_str(
 				"18115515053415953917581139486887001768897115759088831626418737169294616432439",
 			)
@@ -67,46 +60,73 @@ mod test {
 			.unwrap(),
 		];
 
-		for (y, z) in y.iter().zip(z.iter()) {
-			let mut w = *y;
-			w.sub_assign(z);
-			assert!(w.is_zero());
+		for (cipher_text, check_cipher_text) in cipher_text.iter().zip(check_cipher_text.iter()) {
+			let mut cipher_text_diff = *cipher_text;
+			cipher_text_diff.sub_assign(check_cipher_text);
+			assert!(cipher_text_diff.is_zero());
 		}
 	}
 
 	#[test]
 	fn test_circuit() {
+		let (rescue_params, key, plain_text, cipher_text) = setup_test_params();
+
+		let mut assembly = TrivialAssembly::<
+			Bn256,
+			PlonkCsWidth4WithNextStepParams,
+			Width4MainGateWithDNext,
+		>::new();
+
+		let circuit = RescueCircuit::<Bn256> {
+			params: &rescue_params,
+			key: key.iter().map(|key| Some(*key)).collect(),
+			plain_text: plain_text
+				.iter()
+				.map(|plain_text| Some(*plain_text))
+				.collect(),
+			cipher_text: cipher_text,
+		};
+
+		circuit.synthesize(&mut assembly).unwrap();
+		assert!(assembly.is_satisfied());
+		assembly.finalize();
+
+		let worker = Worker::new();
+		let setup = assembly
+			.create_setup::<RescueCircuit<Bn256>>(&worker)
+			.unwrap();
+
+		let crs_mons = Crs::<Bn256, CrsForMonomialForm>::crs_42(
+			setup.permutation_monomials[0].size(),
+			&worker,
+		);
+
+		let _proof = assembly
+			.create_proof::<_, RollingKeccakTranscript<Fr>>(&worker, &setup, &crs_mons, None)
+			.unwrap();
+
+		/*let vk = VerificationKey::from_setup(&setup, &worker, &crs_mons).unwrap();
+		let valid =
+			verify::<Bn256, RescueCircuit<Bn256>, RollingKeccakTranscript<Fr>>(&vk, &proof, None)
+				.unwrap();
+
+		assert!(valid);*/
+	}
+
+	fn setup_test_params() -> (rescue::Params<Fr>, Vec<Fr>, Vec<Fr>, Vec<Fr>) {
 		let rescue_params = get_bn256_params();
 
-		let rng = &mut thread_rng();
-		let c = RescueCircuit::<Bn256> {
-			params: &rescue_params,
-			x: (0..rescue_params.m).map(|_| None).collect(),
-			k: (0..rescue_params.m).map(|_| None).collect(),
-		};
-		let params = generate_random_parameters(c, rng).unwrap();
-
-		let pvk = prepare_verifying_key(&params.vk);
-
-		let x: Vec<Fr> = (0..rescue_params.m)
-			.map(|i| Fr::from_str(&i.to_string()).unwrap())
-			.collect();
-		let k: Vec<Fr> = (0..rescue_params.m)
+		let key: Vec<Fr> = (0..rescue_params.m)
 			.map(|_| Fr::from_str("0").unwrap())
 			.collect();
 
-		let y = rescue::block_enc(&rescue_params, &k, &x);
+		let plain_text: Vec<Fr> = (0..rescue_params.m)
+			.map(|i| Fr::from_str(&i.to_string()).unwrap())
+			.collect();
 
-		let c = RescueCircuit::<Bn256> {
-			params: &rescue_params,
-			x: x.iter().map(|x| Some(*x)).collect(),
-			k: k.iter().map(|k| Some(*k)).collect(),
-		};
-		let proof = create_random_proof(c, &params, rng).unwrap();
+		let cipher_text = rescue::block_enc(&rescue_params, &key, &plain_text);
 
-		let correct = verify_proof(&pvk, &proof, &y).unwrap();
-
-		println!("{}", correct);
+		(rescue_params, key, plain_text, cipher_text)
 	}
 
 	fn get_bn256_params() -> rescue::Params<Fr> {

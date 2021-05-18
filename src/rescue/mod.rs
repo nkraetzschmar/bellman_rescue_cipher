@@ -5,7 +5,7 @@ extern crate num_traits;
 use self::num_bigint::{BigInt, BigUint, ToBigInt};
 use self::num_integer::{ExtendedGcd, Integer};
 use self::num_traits::{One, Zero};
-use bellman::PrimeField;
+use super::PrimeField;
 
 pub mod circuit;
 

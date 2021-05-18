@@ -1,116 +1,67 @@
-use bellman::{Circuit, ConstraintSystem, Engine, Field, SynthesisError, Variable};
+use franklin_crypto::{
+	bellman::{plonk::better_better_cs::cs::*, Engine, Field, SynthesisError},
+	plonk::circuit::allocated_num::{Num::Constant, *},
+};
 
 fn pow<E: Engine, CS: ConstraintSystem<E>>(
-	mut cs: CS,
-	x_val: &Option<E::Fr>,
-	x: &Variable,
+	cs: &mut CS,
+	x: &Num<E>,
 	alpha: u32,
-) -> Result<(Option<E::Fr>, Variable), SynthesisError> {
+) -> Result<Num<E>, SynthesisError> {
 	if alpha == 0 {
-		Ok((Some(E::Fr::one()), CS::one()))
+		Ok(Num::one())
 	} else {
-		let mut y_val = *x_val;
 		let mut y = *x;
 
 		let len = 31 - alpha.leading_zeros();
 		for i in (0..len).rev() {
-			y_val = y_val.map(|mut y| {
-				y.square();
-				y
-			});
-			let y_2 = cs.alloc(|| "y_2", || y_val.ok_or(SynthesisError::AssignmentMissing))?;
-			cs.enforce(|| "y_2 = y * y", |lc| lc + y, |lc| lc + y, |lc| lc + y_2);
-			y = y_2;
+			y = y.mul(cs, &y)?;
 
 			if alpha & (1 << i) != 0 {
-				y_val = y_val.and_then(|mut y| {
-					x_val.as_ref().map(|x| {
-						y.mul_assign(x);
-						y
-					})
-				});
-				let y_x = cs.alloc(|| "y_x", || y_val.ok_or(SynthesisError::AssignmentMissing))?;
-				cs.enforce(|| "y_x = y * x", |lc| lc + y, |lc| lc + *x, |lc| lc + y_x);
-				y = y_x;
+				y = y.mul(cs, &x)?;
 			}
 		}
 
-		Ok((y_val, y))
+		Ok(y)
 	}
 }
 
 fn inv_pow<E: Engine, CS: ConstraintSystem<E>>(
-	mut cs: CS,
-	x_val: &Option<E::Fr>,
-	x: &Variable,
+	cs: &mut CS,
+	x: &Num<E>,
 	alpha: u32,
 	alpha_inv: &[u64],
-) -> Result<(Option<E::Fr>, Variable), SynthesisError> {
-	let y_val = x_val.as_ref().map(|x| x.pow(alpha_inv));
-	let y = cs.alloc(|| "y", || y_val.ok_or(SynthesisError::AssignmentMissing))?;
-	let (_, z) = pow(cs.namespace(|| "pow"), &y_val, &y, alpha)?;
+) -> Result<Num<E>, SynthesisError> {
+	let y = x.get_value().as_ref().map(|x| x.pow(alpha_inv));
+	let y = Num::alloc(cs, y)?;
 
-	cs.enforce(|| "z = x", |lc| lc + z, |lc| lc + CS::one(), |lc| lc + *x);
+	let z = pow(cs, &y, alpha)?;
+	z.enforce_equal(cs, x)?;
 
-	Ok((y_val, y))
+	Ok(y)
 }
 
 fn vec_add<E: Engine, CS: ConstraintSystem<E>>(
-	mut cs: CS,
-	x: &Vec<(Option<E::Fr>, Variable)>,
-	y: &Vec<(Option<E::Fr>, Variable)>,
-) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
+	cs: &mut CS,
+	x: &Vec<Num<E>>,
+	y: &Vec<Num<E>>,
+) -> Result<Vec<Num<E>>, SynthesisError> {
 	if x.len() == y.len() {
-		x.iter()
-			.zip(y.iter())
-			.map(|((x_val, x), (y_val, y))| {
-				let z_val = x_val.as_ref().and_then(|x| {
-					y_val.as_ref().map(|y| {
-						let mut x = *x;
-						x.add_assign(y);
-						x
-					})
-				});
-				let z = cs.alloc(|| "z", || z_val.ok_or(SynthesisError::AssignmentMissing))?;
-				cs.enforce(
-					|| "x + y = z",
-					|lc| lc + *x + *y,
-					|lc| lc + CS::one(),
-					|lc| lc + z,
-				);
-
-				Ok((z_val, z))
-			})
-			.collect()
+		x.iter().zip(y.iter()).map(|(x, y)| x.add(cs, y)).collect()
 	} else {
 		Err(SynthesisError::AssignmentMissing)
 	}
 }
 
-fn vec_add_const<E: Engine, CS: ConstraintSystem<E>>(
-	mut cs: CS,
-	x: &Vec<(Option<E::Fr>, Variable)>,
+fn vec_add_constant<E: Engine, CS: ConstraintSystem<E>>(
+	cs: &mut CS,
+	x: &Vec<Num<E>>,
 	y: &Vec<E::Fr>,
-) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
+) -> Result<Vec<Num<E>>, SynthesisError> {
 	if x.len() == y.len() {
 		x.iter()
-			.zip(y.iter())
-			.map(|((x_val, x), y)| {
-				let z_val = x_val.as_ref().map(|x| {
-					let mut x = *x;
-					x.add_assign(y);
-					x
-				});
-				let z = cs.alloc(|| "z", || z_val.ok_or(SynthesisError::AssignmentMissing))?;
-				cs.enforce(
-					|| "x + y = z",
-					|lc| lc + *x + (*y, CS::one()),
-					|lc| lc + CS::one(),
-					|lc| lc + z,
-				);
-
-				Ok((z_val, z))
-			})
+			.zip(y.iter().map(|y| Constant(*y)))
+			.map(|(x, y)| x.add(cs, &y))
 			.collect()
 	} else {
 		Err(SynthesisError::AssignmentMissing)
@@ -118,68 +69,36 @@ fn vec_add_const<E: Engine, CS: ConstraintSystem<E>>(
 }
 
 fn vec_pow<E: Engine, CS: ConstraintSystem<E>>(
-	mut cs: CS,
-	x: &Vec<(Option<E::Fr>, Variable)>,
+	cs: &mut CS,
+	x: &Vec<Num<E>>,
 	alpha: u32,
-) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
-	x.iter()
-		.map(|(x_val, x)| pow(cs.namespace(|| "pow"), x_val, x, alpha))
-		.collect()
+) -> Result<Vec<Num<E>>, SynthesisError> {
+	x.iter().map(|x| pow(cs, x, alpha)).collect()
 }
 
 fn vec_inv_pow<E: Engine, CS: ConstraintSystem<E>>(
-	mut cs: CS,
-	x: &Vec<(Option<E::Fr>, Variable)>,
+	cs: &mut CS,
+	x: &Vec<Num<E>>,
 	alpha: u32,
 	alpha_inv: &[u64],
-) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
-	x.iter()
-		.map(|(x_val, x)| inv_pow(cs.namespace(|| "inv_pow"), x_val, x, alpha, alpha_inv))
-		.collect()
+) -> Result<Vec<Num<E>>, SynthesisError> {
+	x.iter().map(|x| inv_pow(cs, x, alpha, alpha_inv)).collect()
 }
 
 fn mat_vec_mul<E: Engine, CS: ConstraintSystem<E>>(
-	mut cs: CS,
+	cs: &mut CS,
 	mat: &Vec<Vec<E::Fr>>,
-	x: &Vec<(Option<E::Fr>, Variable)>,
-) -> Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError> {
+	x: &Vec<Num<E>>,
+) -> Result<Vec<Num<E>>, SynthesisError> {
 	mat.iter()
 		.map(|row| {
-			if row.len() == x.len() {
-				let y_val = x
-					.iter()
-					.map(|(x_val, _)| x_val)
-					.zip(row.iter())
-					.map(|(x, y)| {
-						x.as_ref().map(|x| {
-							let mut x = *x;
-							x.mul_assign(y);
-							x
-						})
-					})
-					.fold(Some(E::Fr::zero()), |x, y| {
-						x.and_then(|mut x| {
-							y.map(|y| {
-								x.add_assign(&y);
-								x
-							})
-						})
-					});
-				let y = cs.alloc(|| "y", || y_val.ok_or(SynthesisError::AssignmentMissing))?;
-
-				cs.enforce(
-					|| "sum(x[i] * s[i]) = y",
-					|lc| {
-						x.iter()
-							.map(|(_, x)| x)
-							.zip(row)
-							.fold(lc, |lc, (x, s)| lc + (*s, *x))
-					},
-					|lc| lc + CS::one(),
-					|lc| lc + y,
-				);
-
-				Ok((y_val, y))
+			if row.len() > 0 && row.len() == x.len() {
+				let mut sum = x[0].mul(cs, &Constant(row[0]))?;
+				for i in 1..row.len() {
+					let a = x[i].mul(cs, &Constant(row[i]))?;
+					sum = sum.add(cs, &a)?
+				}
+				Ok(sum)
 			} else {
 				Err(SynthesisError::AssignmentMissing)
 			}
@@ -189,72 +108,59 @@ fn mat_vec_mul<E: Engine, CS: ConstraintSystem<E>>(
 
 pub struct RescueCircuit<'a, E: Engine> {
 	pub params: &'a super::Params<E::Fr>,
-	pub x: Vec<Option<E::Fr>>,
-	pub k: Vec<Option<E::Fr>>,
+	pub key: Vec<Option<E::Fr>>,
+	pub plain_text: Vec<Option<E::Fr>>,
+	pub cipher_text: Vec<E::Fr>,
 }
 
 impl<E: Engine> Circuit<E> for RescueCircuit<'_, E> {
-	fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
-		let mut x: Vec<(Option<E::Fr>, Variable)> = self
-			.x
-			.iter()
-			.map(|x| {
-				let x_val = *x;
-				let x = cs.alloc(|| "x", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
-				Ok((x_val, x))
-			})
-			.collect::<Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError>>()?;
+	type MainGate = Width4MainGateWithDNext;
 
-		let mut k: Vec<(Option<E::Fr>, Variable)> = self
-			.k
-			.iter()
-			.map(|k| {
-				let k_val = *k;
-				let k = cs.alloc(|| "k", || k_val.ok_or(SynthesisError::AssignmentMissing))?;
-				Ok((k_val, k))
-			})
-			.collect::<Result<Vec<(Option<E::Fr>, Variable)>, SynthesisError>>()?;
+	fn declare_used_gates() -> Result<Vec<Box<dyn GateInternal<E>>>, SynthesisError> {
+		Ok(vec![Self::MainGate::default().into_internal()])
+	}
 
-		k = vec_add_const(cs.namespace(|| "vec_add"), &k, &self.params.constants_init)?;
-		x = vec_add(cs.namespace(|| "vec_add"), &x, &k)?;
+	fn synthesize<CS: ConstraintSystem<E>>(&self, cs: &mut CS) -> Result<(), SynthesisError> {
+		let mut x: Vec<Num<E>> = self
+			.plain_text
+			.iter()
+			.map(|x| Num::alloc(cs, *x))
+			.collect::<Result<Vec<Num<E>>, SynthesisError>>()?;
+
+		let mut k: Vec<Num<E>> = self
+			.key
+			.iter()
+			.map(|k| Num::alloc(cs, *k))
+			.collect::<Result<Vec<Num<E>>, SynthesisError>>()?;
+
+		k = vec_add_constant(cs, &k, &self.params.constants_init)?;
+		x = vec_add(cs, &x, &k)?;
 
 		for (constant_0, constant_1) in self.params.round_constants.iter() {
-			k = vec_inv_pow(
-				cs.namespace(|| "vec_inv_pow"),
-				&k,
-				self.params.alpha,
-				&self.params.alpha_inv,
-			)?;
-			k = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &k)?;
-			k = vec_add_const(cs.namespace(|| "vec_add"), &k, constant_0)?;
+			k = vec_inv_pow(cs, &k, self.params.alpha, &self.params.alpha_inv)?;
+			k = mat_vec_mul(cs, &self.params.mat, &k)?;
+			k = vec_add_constant(cs, &k, constant_0)?;
 
-			x = vec_inv_pow(
-				cs.namespace(|| "vec_inv_pow"),
-				&x,
-				self.params.alpha,
-				&self.params.alpha_inv,
-			)?;
-			x = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &x)?;
-			x = vec_add(cs.namespace(|| "vec_add"), &x, &k)?;
+			x = vec_inv_pow(cs, &x, self.params.alpha, &self.params.alpha_inv)?;
+			x = mat_vec_mul(cs, &self.params.mat, &x)?;
+			x = vec_add(cs, &x, &k)?;
 
-			k = vec_pow(cs.namespace(|| "vec_pow"), &k, self.params.alpha)?;
-			k = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &k)?;
-			k = vec_add_const(cs.namespace(|| "vec_add"), &k, constant_1)?;
+			k = vec_pow(cs, &k, self.params.alpha)?;
+			k = mat_vec_mul(cs, &self.params.mat, &k)?;
+			k = vec_add_constant(cs, &k, constant_1)?;
 
-			x = vec_pow(cs.namespace(|| "vec_pow"), &x, self.params.alpha)?;
-			x = mat_vec_mul(cs.namespace(|| "mat_vec_mul"), &self.params.mat, &x)?;
-			x = vec_add(cs.namespace(|| "vec_add"), &x, &k)?;
+			x = vec_pow(cs, &x, self.params.alpha)?;
+			x = mat_vec_mul(cs, &self.params.mat, &x)?;
+			x = vec_add(cs, &x, &k)?;
 		}
 
-		for (x_val, x) in x.iter() {
-			let out =
-				cs.alloc_input(|| "out", || x_val.ok_or(SynthesisError::AssignmentMissing))?;
-			cs.enforce(
-				|| "x_val = out",
-				|lc| lc + *x,
-				|lc| lc + CS::one(),
-				|lc| lc + out,
-			);
+		for (cipher_text, x) in self
+			.cipher_text
+			.iter()
+			.map(|cipher_text| Constant(*cipher_text))
+			.zip(x.iter())
+		{
+			x.enforce_equal(cs, &cipher_text)?;
 		}
 
 		Ok(())
