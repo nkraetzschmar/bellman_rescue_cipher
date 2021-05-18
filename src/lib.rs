@@ -19,7 +19,7 @@ mod test {
 
 	use super::rescue;
 
-	use rescue::circuit::RescueCircuit;
+	use rescue::circuit::{RescueCircuit, RescueStreamCTRCircuit};
 
 	#[test]
 	fn test_block_enc() {
@@ -111,6 +111,68 @@ mod test {
 				.unwrap();
 
 		assert!(valid);*/
+	}
+
+	#[test]
+	fn test_stream_cipher_ctr() {
+		let rescue_params = get_bn256_params();
+
+		let key: Vec<Fr> = (0..rescue_params.m)
+			.map(|_| Fr::from_str("0").unwrap())
+			.collect();
+
+		let nonce: Vec<Fr> = (0..(rescue_params.m - 1))
+			.map(|_| Fr::from_str("1").unwrap())
+			.collect();
+
+		let plain_text: Vec<Fr> = (0..(rescue_params.m * 10 + rescue_params.m / 2))
+			.map(|i| Fr::from_str(&i.to_string()).unwrap())
+			.collect();
+
+		for plain_text in plain_text.iter() {
+			println!("{:?}", plain_text);
+		}
+
+		let cipher_text = rescue::stream_cipher_ctr(&rescue_params, &key, &nonce, &plain_text);
+
+		for cipher_text in cipher_text.iter() {
+			println!("{:?}", cipher_text);
+		}
+
+		let mut assembly = TrivialAssembly::<
+			Bn256,
+			PlonkCsWidth4WithNextStepParams,
+			Width4MainGateWithDNext,
+		>::new();
+
+		let circuit = RescueStreamCTRCircuit::<Bn256> {
+			params: &rescue_params,
+			key: key.iter().map(|key| Some(*key)).collect(),
+			nonce: nonce.iter().map(|nonce| Some(*nonce)).collect(),
+			plain_text: plain_text
+				.iter()
+				.map(|plain_text| Some(*plain_text))
+				.collect(),
+			cipher_text: cipher_text,
+		};
+
+		circuit.synthesize(&mut assembly).unwrap();
+		assert!(assembly.is_satisfied());
+		assembly.finalize();
+
+		let worker = Worker::new();
+		let setup = assembly
+			.create_setup::<RescueStreamCTRCircuit<Bn256>>(&worker)
+			.unwrap();
+
+		let crs_mons = Crs::<Bn256, CrsForMonomialForm>::crs_42(
+			setup.permutation_monomials[0].size(),
+			&worker,
+		);
+
+		let _proof = assembly
+			.create_proof::<_, RollingKeccakTranscript<Fr>>(&worker, &setup, &crs_mons, None)
+			.unwrap();
 	}
 
 	fn setup_test_params() -> (rescue::Params<Fr>, Vec<Fr>, Vec<Fr>, Vec<Fr>) {

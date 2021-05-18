@@ -129,9 +129,9 @@ impl<F: PrimeField> Params<F> {
 	}
 }
 
-pub fn block_enc<F: PrimeField>(params: &Params<F>, k: &Vec<F>, x: &Vec<F>) -> Vec<F> {
-	let mut x = x.clone();
-	let mut k = k.clone();
+pub fn block_enc<F: PrimeField>(params: &Params<F>, key: &Vec<F>, plain_text: &Vec<F>) -> Vec<F> {
+	let mut k = key.clone();
+	let mut x = plain_text.clone();
 
 	k = vec_add(&k, &params.constants_init);
 	x = vec_add(&x, &k);
@@ -155,4 +155,37 @@ pub fn block_enc<F: PrimeField>(params: &Params<F>, k: &Vec<F>, x: &Vec<F>) -> V
 	}
 
 	x
+}
+
+/// stream cipher in CTR mode
+/// using m-1 field elements as nonce and 1 element as counter
+/// padding message with zeros to nearest multiple of m
+pub fn stream_cipher_ctr<F: PrimeField>(
+	params: &Params<F>,
+	key: &Vec<F>,
+	nonce: &Vec<F>,
+	plain_text: &Vec<F>,
+) -> Vec<F> {
+	let mut cipher_text = vec![];
+
+	let mut input = nonce.clone();
+	input.push(F::zero());
+	assert!(input.len() == params.m);
+
+	for (chunk, ctr) in plain_text.chunks(params.m).zip(0..) {
+		let ctr = F::from_str(&ctr.to_string()).unwrap();
+		input[params.m - 1] = ctr;
+
+		let key_stream = block_enc(params, key, &input);
+
+		let mut plain_text = chunk.to_vec();
+		for _ in chunk.len()..params.m {
+			plain_text.push(F::zero());
+		}
+
+		let mut cipher_stream = vec_add(&plain_text, &key_stream);
+		cipher_text.append(&mut cipher_stream);
+	}
+
+	cipher_text
 }
